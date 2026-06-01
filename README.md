@@ -8,7 +8,7 @@ dependencies:
 ```
 
 > **First build downloads ~10–80 MB of native binaries** from the matching
-> [GitHub Release](https://github.com/ayman708-UX/libtorrent_flutter/releases)
+> [GitHub Release](https://github.com/tupats/libtorrent_flutter/releases)
 > (pub.dev's 100 MB tarball limit can't hold the libtorrent + OpenSSL static
 > libs for every platform). The download is wired into Gradle / CMake /
 > CocoaPods and only happens once per package version. See
@@ -203,7 +203,7 @@ FlutterForegroundTask.startService(
 ## Offline / air-gapped builds
 
 Native binaries are downloaded from the matching
-[GitHub Release](https://github.com/ayman708-UX/libtorrent_flutter/releases)
+[GitHub Release](https://github.com/tupats/libtorrent_flutter/releases)
 on the first build (Gradle / CMake / CocoaPods do this automatically — pub
 itself never runs the download). To opt out:
 

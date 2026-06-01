@@ -1385,7 +1385,10 @@ static bool serve_range(StreamEngine* s, TorrReader* reader, socket_t cli,
                 int old_p = s->trailing_pieces.front();
                 s->trailing_pieces.pop_front();
                 try {
-                    s->handle.piece_priority(lt::piece_index_t(old_p), lt::dont_download);
+                    // Demote played piece to low_priority — keeps background
+                    // download going for the whole file, but yields bandwidth
+                    // to the upcoming readahead window.
+                    s->handle.piece_priority(lt::piece_index_t(old_p), lt::low_priority);
                 } catch (...) {}
                 // Release cache memory for evicted piece
                 if (s->cache) {
@@ -1530,14 +1533,15 @@ static void handle_connection(StreamEngine* s, socket_t cli, int reader_id) {
                 }
                 s->read_cv.notify_all();
 
-                // Flush trailing retention window — drop old pieces to
-                // free bandwidth for the new seek position
+                // Flush trailing retention window — demote old pieces to
+                // low_priority so they yield bandwidth to the new seek
+                // position but keep downloading in the background.
                 {
                     std::lock_guard<std::mutex> tlk(s->trailing_mu);
                     for (int old_p : s->trailing_pieces) {
                         try {
                             s->handle.piece_priority(
-                                lt::piece_index_t(old_p), lt::dont_download);
+                                lt::piece_index_t(old_p), lt::low_priority);
                         } catch (...) {}
                     }
                     s->trailing_pieces.clear();
@@ -2370,9 +2374,14 @@ TORRENT_API lt_stream_id lt_start_stream(lt_session_t session,
         handle.unset_flags(lt::torrent_flags::stop_when_ready);
 
         // Set piece priorities BEFORE resume().
-        // All pieces start as dont_download, then we enable only what we need.
+        // Pieces outside the target file remain dont_download. Pieces inside
+        // the target file default to low_priority so the whole file keeps
+        // downloading in the background until completion — streaming pieces
+        // still win via top_priority + deadlines.
         std::vector<lt::download_priority_t> prios(
             (size_t)ti->num_pieces(), lt::dont_download);
+        for (int p = s->start_piece; p <= s->end_piece; ++p)
+            prios[p] = lt::low_priority;
 
         // Critical startup pieces — adaptive count based on bitrate estimate.
         // These get top_priority + tight deadlines to minimize time-to-first-frame.

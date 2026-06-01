@@ -5,9 +5,9 @@ Pod::Spec.new do |s|
   s.description      = <<-DESC
   Native libtorrent 2.0 bindings for Flutter with an integrated HTTP streaming server.
                        DESC
-  s.homepage         = 'https://github.com/ayman708-UX/libtorrent_flutter'
+  s.homepage         = 'https://github.com/tupats/libtorrent_flutter'
   s.license          = { :type => 'GPL-3.0', :file => '../LICENSE' }
-  s.author           = { 'ayman708-UX' => 'ayman@example.com' }
+  s.author           = { 'tupats' => 'ayman@example.com' }
   s.source           = { :path => '.' }
 
   s.dependency 'FlutterMacOS'
@@ -30,7 +30,7 @@ Pod::Spec.new do |s|
       version_match = File.read(pubspec_path).match(/^version:\s*(\S+)/)
       if version_match
         plugin_version = version_match[1]
-        zip_url  = "https://github.com/ayman708-UX/libtorrent_flutter/releases/download/v#{plugin_version}/macos-native-lib.zip"
+        zip_url  = "https://github.com/tupats/libtorrent_flutter/releases/download/v#{plugin_version}/macos-native-lib.zip"
         zip_path = File.join(__dir__, '.macos-native-lib.zip')
         Pod::UI.puts "libtorrent_flutter: downloading prebuilt dylib from #{zip_url}"
         begin

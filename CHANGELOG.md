@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.8.6-tvapp.1
+
+- **Continuous background download for streamed file.** Previously, pieces
+  outside the readahead window (and trailing/seek-evicted pieces) were set to
+  `dont_download`. The torrent would stop downloading once the player paused or
+  briefly disconnected, and never reached 100%. Now the entire streamed file is
+  queued at `low_priority` while the head/critical/seek-target pieces stay at
+  `top_priority` with deadlines — streaming bandwidth is unaffected, but the
+  file completes in the background.
+
 ## 1.8.5
 
 - Metadata-only release to improve pub.dev score (no code changes).

@@ -335,3 +335,34 @@ class BtConfig {
       'readAhead=$readerReadAhead%, conns=$connectionsLimit, '
       'encrypt=$forceEncrypt, responsive=$responsiveMode)';
 }
+
+// ─── Memory-backed disk I/O ──────────────────────────────────────────────────
+
+/// Snapshot of the in-memory piece store. Process-wide (single disk_io).
+class MemoryStats {
+  /// Bytes currently held across all torrents.
+  final int usedBytes;
+
+  /// Eviction threshold. When [usedBytes] exceeds this, LRU eviction runs.
+  final int capBytes;
+
+  /// Total pieces resident in memory across all torrents.
+  final int pieceCount;
+
+  /// Cumulative pieces evicted since session start.
+  final int evictedCount;
+
+  const MemoryStats({
+    required this.usedBytes,
+    required this.capBytes,
+    required this.pieceCount,
+    required this.evictedCount,
+  });
+
+  double get usedPct => capBytes > 0 ? usedBytes / capBytes : 0;
+
+  @override
+  String toString() => 'MemoryStats(used=${usedBytes ~/ (1024 * 1024)}MB / '
+      '${capBytes ~/ (1024 * 1024)}MB, pieces=$pieceCount, '
+      'evicted=$evictedCount)';
+}

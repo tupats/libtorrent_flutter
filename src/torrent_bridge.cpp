@@ -20,8 +20,10 @@
 #endif
 
 #include "torrent_bridge.h"
+#include "memory_disk_io.hpp"
 
 #include <libtorrent/session.hpp>
+#include <libtorrent/session_params.hpp>
 #include <libtorrent/settings_pack.hpp>
 #include <libtorrent/add_torrent_params.hpp>
 #include <libtorrent/torrent_handle.hpp>
@@ -949,6 +951,13 @@ struct SessionWrapper {
     std::unordered_map<int64_t, std::unique_ptr<StreamEngine>> streams;
     std::atomic<int64_t> next_stream_id{1};
 
+    // Dedup for force_recheck recovery. Key: torrent_id. Value: last
+    // recheck time. Prevents thrashing when many evicted-piece reads hit
+    // in quick succession after a backward seek.
+    std::mutex                                       recheck_mu;
+    std::unordered_map<int64_t, chr::steady_clock::time_point> last_recheck;
+    static constexpr chr::seconds RECHECK_DEDUP{30};
+
     // alert thread — sole consumer of session.pop_alerts()
     std::thread       alert_thread;
     std::atomic<bool> alert_running{false};
@@ -962,7 +971,12 @@ struct SessionWrapper {
     std::mutex              dart_queue_mu;
     std::deque<AlertRecord> dart_queue;
 
-    explicit SessionWrapper(lt::settings_pack sp) : session(std::move(sp)) {}
+    explicit SessionWrapper(lt::settings_pack sp)
+        : session([&] {
+              lt::session_params params(std::move(sp));
+              params.disk_io_constructor = &tb::memory_disk_io_constructor;
+              return lt::session(std::move(params));
+          }()) {}
 
     // ── TorrServer config — port of settings.BTSets (session-level defaults) ──
     lt_bt_config bt_config;
@@ -1013,15 +1027,54 @@ struct SessionWrapper {
                         // read_piece_alert → route to stream's cache
                         if (auto* rpa = lt::alert_cast<lt::read_piece_alert>(a)) {
                             int p = static_cast<int>(rpa->piece);
-                            std::lock_guard<std::mutex> slk(streams_mu);
-                            for (auto& kv : streams) {
-                                auto& s = kv.second;
-                                if (!s->active || s->handle != rpa->handle) continue;
-                                s->on_piece_read(p,
-                                    rpa->error ? nullptr : rpa->buffer.get(),
-                                    rpa->error ? 0 : rpa->size,
-                                    !rpa->error);
-                                break;
+                            int64_t matched_stream_id = -1;
+                            {
+                                std::lock_guard<std::mutex> slk(streams_mu);
+                                for (auto& kv : streams) {
+                                    auto& s = kv.second;
+                                    if (!s->active || s->handle != rpa->handle) continue;
+                                    s->on_piece_read(p,
+                                        rpa->error ? nullptr : rpa->buffer.get(),
+                                        rpa->error ? 0 : rpa->size,
+                                        !rpa->error);
+                                    matched_stream_id = kv.first;
+                                    break;
+                                }
+                            }
+
+                            // Eviction recovery: when the memory disk_io
+                            // dropped a piece but libtorrent's bitfield still
+                            // claims it complete, the read fails. force_recheck
+                            // re-hashes every piece — those still in memory pass,
+                            // evicted ones fail and are queued for re-download.
+                            // Debounced per torrent to avoid thrash.
+                            if (rpa->error && matched_stream_id >= 0) {
+                                try {
+                                    if (rpa->handle.is_valid() &&
+                                        rpa->handle.have_piece(rpa->piece))
+                                    {
+                                        int64_t const tid =
+                                            id_for_handle(rpa->handle);
+                                        auto now = chr::steady_clock::now();
+                                        bool fire = false;
+                                        {
+                                            std::lock_guard<std::mutex> rl(recheck_mu);
+                                            auto it = last_recheck.find(tid);
+                                            if (it == last_recheck.end() ||
+                                                (now - it->second) > RECHECK_DEDUP)
+                                            {
+                                                last_recheck[tid] = now;
+                                                fire = true;
+                                            }
+                                        }
+                                        if (fire) {
+                                            TB_LOG("evicted-piece read fail "
+                                                "tid=%lld piece=%d → force_recheck",
+                                                (long long)tid, p);
+                                            rpa->handle.force_recheck();
+                                        }
+                                    }
+                                } catch (...) {}
                             }
                             continue;
                         }
@@ -1097,6 +1150,18 @@ struct SessionWrapper {
                 // cleanPieces → getRemPieces → setLoadPriority. Our alert thread
                 // already marks pieces complete which triggers cleanPieces via
                 // the cache write path.
+
+                // ── drain memory_disk_io eviction queue ──
+                // The in-memory piece store evicts LRU pieces under cap.
+                // libtorrent's public 2.0.x API has no torrent_handle::clear_piece
+                // to invalidate the bitfield, so we just drain the queue
+                // (stats hook). Result: pieces outside the playback window
+                // are dropped from memory; if the player seeks back to one
+                // of them, the read returns short and the stream stalls
+                // until the user seeks forward again. Tracked for v2.
+                if (auto* mdi = tb::memory_disk_io::instance()) {
+                    (void) mdi->drain_eviction_queue();
+                }
 
             } catch (...) {}
         }
@@ -2621,6 +2686,133 @@ TORRENT_API void lt_set_upload_limit(lt_session_t session, int bps) {
 
 TORRENT_API const char* lt_last_error(void) { return g_last_error.c_str(); }
 TORRENT_API const char* lt_version(void)    { return LIBTORRENT_VERSION; }
+
+// ── memory-backed disk I/O — process-wide controls ─────────────────────────────
+
+TORRENT_API void lt_set_memory_cap(int64_t cap_bytes) {
+    if (auto* mdi = tb::memory_disk_io::instance()) {
+        mdi->set_cap_bytes(cap_bytes);
+    }
+}
+
+TORRENT_API void lt_get_memory_stats(lt_memory_stats* out) {
+    if (!out) return;
+    auto* mdi = tb::memory_disk_io::instance();
+    if (!mdi) {
+        out->used_bytes = 0;
+        out->cap_bytes = 0;
+        out->piece_count = 0;
+        out->evicted_count = 0;
+        return;
+    }
+    auto s = mdi->stats();
+    out->used_bytes    = s.used_bytes;
+    out->cap_bytes     = s.cap_bytes;
+    out->piece_count   = s.piece_count;
+    out->evicted_count = s.evicted_count;
+}
+
+TORRENT_API void lt_set_playback_head(lt_session_t session,
+                                      lt_stream_id stream_id,
+                                      int64_t byte_offset_in_file)
+{
+    if (!session) return;
+    auto* mdi = tb::memory_disk_io::instance();
+    if (!mdi) return;
+    auto* sw = to_sw(session);
+    std::lock_guard<std::mutex> lk(sw->streams_mu);
+    auto it = sw->streams.find(stream_id);
+    if (it == sw->streams.end()) return;
+    auto* s = it->second.get();
+    int64_t const abs_byte = s->file_offset + byte_offset_in_file;
+    s->read_head.store(byte_offset_in_file);
+    try {
+        auto ih = s->handle.info_hashes();
+        if (ih.has_v1()) mdi->set_head_for_info_hash(ih.v1, abs_byte);
+    } catch (...) {}
+}
+
+TORRENT_API void lt_set_memory_window(lt_session_t session,
+                                      lt_stream_id stream_id,
+                                      int64_t rewind_bytes,
+                                      int64_t prefetch_bytes)
+{
+    if (!session) return;
+    auto* mdi = tb::memory_disk_io::instance();
+    if (!mdi) return;
+    auto* sw = to_sw(session);
+    std::lock_guard<std::mutex> lk(sw->streams_mu);
+    auto it = sw->streams.find(stream_id);
+    if (it == sw->streams.end()) return;
+    auto* s = it->second.get();
+    try {
+        auto ih = s->handle.info_hashes();
+        if (ih.has_v1())
+            mdi->set_window_for_info_hash(ih.v1, rewind_bytes, prefetch_bytes);
+    } catch (...) {}
+}
+
+// ── cross-platform RAM probe ──────────────────────────────────────────────────
+} // extern "C"  -- temporarily close to use platform headers without
+                // mass-including them at file top
+
+#if defined(__linux__) || defined(__ANDROID__)
+  #include <sys/sysinfo.h>
+#elif defined(__APPLE__)
+  #include <mach/mach.h>
+  #include <mach/mach_host.h>
+  #include <sys/sysctl.h>
+#elif defined(_WIN32)
+  #include <windows.h>
+#endif
+
+extern "C" {
+
+TORRENT_API int lt_get_system_memory(int64_t* total_bytes,
+                                     int64_t* avail_bytes)
+{
+    if (!total_bytes || !avail_bytes) return -1;
+#if defined(__linux__) || defined(__ANDROID__)
+    struct sysinfo si{};
+    if (sysinfo(&si) != 0) return -1;
+    int64_t const unit = si.mem_unit ? si.mem_unit : 1;
+    *total_bytes = static_cast<int64_t>(si.totalram) * unit;
+    *avail_bytes = (static_cast<int64_t>(si.freeram) +
+                    static_cast<int64_t>(si.bufferram)) * unit;
+    return 0;
+#elif defined(__APPLE__)
+    int64_t total = 0;
+    size_t sz = sizeof(total);
+    if (sysctlbyname("hw.memsize", &total, &sz, nullptr, 0) != 0) return -1;
+    *total_bytes = total;
+
+    mach_port_t host = mach_host_self();
+    vm_size_t page_size = 0;
+    if (host_page_size(host, &page_size) != KERN_SUCCESS) return -1;
+
+    vm_statistics64_data_t vm{};
+    mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
+    if (host_statistics64(host, HOST_VM_INFO64,
+                          reinterpret_cast<host_info64_t>(&vm),
+                          &count) != KERN_SUCCESS) return -1;
+    int64_t const free_pages = static_cast<int64_t>(vm.free_count)
+                             + static_cast<int64_t>(vm.inactive_count)
+                             + static_cast<int64_t>(vm.purgeable_count);
+    *avail_bytes = free_pages * static_cast<int64_t>(page_size);
+    return 0;
+#elif defined(_WIN32)
+    MEMORYSTATUSEX ms{};
+    ms.dwLength = sizeof(ms);
+    if (!GlobalMemoryStatusEx(&ms)) return -1;
+    *total_bytes = static_cast<int64_t>(ms.ullTotalPhys);
+    *avail_bytes = static_cast<int64_t>(ms.ullAvailPhys);
+    return 0;
+#else
+    *total_bytes = 0;
+    *avail_bytes = 0;
+    return -1;
+#endif
+}
 
 // ── preload — port of torr/preload.go ───────────────────────────────────────────
 

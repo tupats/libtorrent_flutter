@@ -184,6 +184,39 @@ TORRENT_API void lt_set_cache_settings(lt_session_t session, lt_stream_id id,
 TORRENT_API void lt_set_download_limit(lt_session_t session, int bytes_per_sec);
 TORRENT_API void lt_set_upload_limit(lt_session_t session, int bytes_per_sec);
 
+/* memory-backed disk I/O — process-wide stats and cap.
+ * Replaces eMMC piece storage with in-process memory.
+ * Active for every session created with this build. */
+typedef struct {
+    int64_t used_bytes;     /* memory currently held by piece store */
+    int64_t cap_bytes;      /* eviction trigger threshold            */
+    int64_t piece_count;    /* total pieces resident in memory       */
+    int64_t evicted_count;  /* cumulative evictions since startup    */
+} lt_memory_stats;
+
+TORRENT_API void lt_set_memory_cap(int64_t cap_bytes);
+TORRENT_API void lt_get_memory_stats(lt_memory_stats* out);
+
+/* Update the playback head for a stream. byte_offset is within the
+ * streamed file. Bridge maps to absolute torrent offset internally.
+ * Used by memory disk_io to pin pieces around the head and evict the rest. */
+TORRENT_API void lt_set_playback_head(lt_session_t session,
+                                      lt_stream_id stream_id,
+                                      int64_t byte_offset_in_file);
+
+/* Override the rewind/prefetch window (bytes) for a stream's torrent.
+ * Defaults are 16 MB rewind, 160 MB prefetch. */
+TORRENT_API void lt_set_memory_window(lt_session_t session,
+                                      lt_stream_id stream_id,
+                                      int64_t rewind_bytes,
+                                      int64_t prefetch_bytes);
+
+/* Snapshot system RAM. Cross-platform: sysinfo on Linux/Android,
+ * host_statistics64 on Darwin, GlobalMemoryStatusEx on Windows.
+ * Sets *total_bytes and *avail_bytes; returns 0 on success, -1 on failure. */
+TORRENT_API int lt_get_system_memory(int64_t* total_bytes,
+                                     int64_t* avail_bytes);
+
 /* utility */
 TORRENT_API const char* lt_last_error(void);
 TORRENT_API const char* lt_version(void);

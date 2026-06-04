@@ -10,6 +10,7 @@ import 'dart:math';
 import 'package:ffi/ffi.dart';
 
 import 'ffi_bindings.dart';
+import 'memory_budget_controller.dart';
 import 'models.dart';
 
 // ─── Tracker Management ─────────────────────────────────────────────────────
@@ -115,6 +116,11 @@ class LibtorrentFlutter {
   late final TorrentBridgeBindings _b;
   late final Pointer<LtSessionOpaque> _session;
   late final String _defaultSavePath;
+  MemoryBudgetController? _memoryBudget;
+
+  /// Auto-tuning memory budget controller. Adjusts the in-memory piece
+  /// store cap based on system free RAM. Null if [init] disabled it.
+  MemoryBudgetController? get memoryBudget => _memoryBudget;
 
   // Torrent status
   final _torrentsCtrl = StreamController<Map<int, TorrentInfo>>.broadcast();
@@ -153,6 +159,10 @@ class LibtorrentFlutter {
     Duration pollInterval = const Duration(milliseconds: 600),
     bool fetchTrackers = true,
     String? defaultSavePath,
+    bool autoTuneMemory = true,
+    double memoryFraction = 0.60,
+    int memoryMinCap = 128 * 1024 * 1024,
+    int? memoryMaxCap,
   }) async {
     if (_instance != null) return;
     final engine = LibtorrentFlutter._();
@@ -180,6 +190,15 @@ class LibtorrentFlutter {
     _instance = engine;
     engine._defaultSavePath = defaultSavePath ?? Directory.systemTemp.path;
     engine._startPolling(pollInterval);
+
+    if (autoTuneMemory) {
+      engine._memoryBudget = MemoryBudgetController(
+        engine._b,
+        memoryFraction: memoryFraction,
+        minCap: memoryMinCap,
+        maxCap: memoryMaxCap,
+      )..start();
+    }
   }
 
   // ─── Public Streams ─────────────────────────────────────────────────────────
@@ -354,6 +373,42 @@ class LibtorrentFlutter {
 
   /// Set upload speed limit in bytes/sec (0 = unlimited).
   void setUploadLimit(int bps) => _b.setUploadLimit(_session, bps);
+
+  // ─── Memory-backed disk I/O ──────────────────────────────────────────────
+
+  /// Set the in-memory piece-store cap in bytes. When usage exceeds this,
+  /// the disk_io evicts least-recently-accessed pieces. Process-wide.
+  void setMemoryCap(int bytes) => _b.setMemoryCap(bytes);
+
+  /// Snapshot the memory piece-store state. Process-wide.
+  MemoryStats getMemoryStats() {
+    final p = calloc<LtMemoryStats>();
+    try {
+      _b.getMemoryStats(p);
+      return MemoryStats(
+        usedBytes: p.ref.usedBytes,
+        capBytes: p.ref.capBytes,
+        pieceCount: p.ref.pieceCount,
+        evictedCount: p.ref.evictedCount,
+      );
+    } finally {
+      calloc.free(p);
+    }
+  }
+
+  /// Update the playback head for a stream. [byteOffsetInFile] is the
+  /// current player position within the streamed file. The memory disk
+  /// I/O pins pieces around this head and evicts the rest. Call from the
+  /// player's position stream — every 250–500 ms is plenty.
+  void updatePlaybackHead(int streamId, int byteOffsetInFile) =>
+      _b.setPlaybackHead(_session, streamId, byteOffsetInFile);
+
+  /// Override the rewind / prefetch window for a stream's torrent.
+  /// Defaults are 16 MB rewind, 160 MB prefetch.
+  void setMemoryWindow(int streamId,
+      {required int rewindBytes, required int prefetchBytes}) {
+    _b.setMemoryWindow(_session, streamId, rewindBytes, prefetchBytes);
+  }
 
   // ─── Engine Configuration — port of settings/btsets.go + btserver.go ───────
 
@@ -549,6 +604,7 @@ class LibtorrentFlutter {
   Future<void> dispose() async {
     disposeAll();
     _pollTimer?.cancel();
+    _memoryBudget?.stop();
     _b.destroySession(_session);
     await _torrentsCtrl.close();
     await _streamsCtrl.close();

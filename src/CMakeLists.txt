@@ -22,6 +22,8 @@ endif()
 add_library(libtorrent_flutter SHARED
     torrent_bridge.cpp
     torrent_bridge.h
+    memory_disk_io.cpp
+    memory_disk_io.hpp
 )
 
 target_compile_definitions(libtorrent_flutter PRIVATE

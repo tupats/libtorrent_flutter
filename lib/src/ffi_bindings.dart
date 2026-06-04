@@ -212,6 +212,29 @@ typedef LtSetDownloadLimit = void Function(Pointer<LtSessionOpaque>, int);
 typedef _SetUploadLimitN = Void Function(Pointer<LtSessionOpaque>, Int32);
 typedef LtSetUploadLimit = void Function(Pointer<LtSessionOpaque>, int);
 
+// ─── Memory-backed disk I/O ──────────────────────────────────────────────────
+final class LtMemoryStats extends Struct {
+  @Int64() external int usedBytes;
+  @Int64() external int capBytes;
+  @Int64() external int pieceCount;
+  @Int64() external int evictedCount;
+}
+
+typedef _SetMemoryCapN  = Void Function(Int64);
+typedef LtSetMemoryCap  = void Function(int);
+
+typedef _GetMemoryStatsN = Void Function(Pointer<LtMemoryStats>);
+typedef LtGetMemoryStats = void Function(Pointer<LtMemoryStats>);
+
+typedef _SetPlaybackHeadN = Void Function(Pointer<LtSessionOpaque>, Int64, Int64);
+typedef LtSetPlaybackHead = void Function(Pointer<LtSessionOpaque>, int, int);
+
+typedef _SetMemoryWindowN = Void Function(Pointer<LtSessionOpaque>, Int64, Int64, Int64);
+typedef LtSetMemoryWindow = void Function(Pointer<LtSessionOpaque>, int, int, int);
+
+typedef _GetSystemMemoryN = Int32 Function(Pointer<Int64>, Pointer<Int64>);
+typedef LtGetSystemMemory = int Function(Pointer<Int64>, Pointer<Int64>);
+
 // ─── Utility ─────────────────────────────────────────────────────────────────
 typedef _LastErrorN = Pointer<Utf8> Function();
 typedef LtLastError = Pointer<Utf8> Function();
@@ -282,6 +305,11 @@ class TorrentBridgeBindings {
   late final LtGetActiveStreams   getActiveStreams;
   late final LtLastError          lastError;
   late final LtVersion            version;
+  late final LtSetMemoryCap       setMemoryCap;
+  late final LtGetMemoryStats     getMemoryStats;
+  late final LtSetPlaybackHead    setPlaybackHead;
+  late final LtSetMemoryWindow    setMemoryWindow;
+  late final LtGetSystemMemory    getSystemMemory;
 
   TorrentBridgeBindings(this._lib) {
     createSession       = _lib.lookup<NativeFunction<_CreateSessionN>>('lt_create_session').asFunction<LtCreateSession>();
@@ -313,6 +341,11 @@ class TorrentBridgeBindings {
     getActiveStreams     = _lib.lookup<NativeFunction<_GetActiveStreamsN>>('lt_get_active_streams').asFunction<LtGetActiveStreams>();
     lastError           = _lib.lookup<NativeFunction<_LastErrorN>>('lt_last_error').asFunction<LtLastError>();
     version             = _lib.lookup<NativeFunction<_VersionN>>('lt_version').asFunction<LtVersion>();
+    setMemoryCap        = _lib.lookup<NativeFunction<_SetMemoryCapN>>('lt_set_memory_cap').asFunction<LtSetMemoryCap>();
+    getMemoryStats      = _lib.lookup<NativeFunction<_GetMemoryStatsN>>('lt_get_memory_stats').asFunction<LtGetMemoryStats>();
+    setPlaybackHead     = _lib.lookup<NativeFunction<_SetPlaybackHeadN>>('lt_set_playback_head').asFunction<LtSetPlaybackHead>();
+    setMemoryWindow     = _lib.lookup<NativeFunction<_SetMemoryWindowN>>('lt_set_memory_window').asFunction<LtSetMemoryWindow>();
+    getSystemMemory     = _lib.lookup<NativeFunction<_GetSystemMemoryN>>('lt_get_system_memory').asFunction<LtGetSystemMemory>();
   }
 
   factory TorrentBridgeBindings.open() => TorrentBridgeBindings(_openNativeLib());

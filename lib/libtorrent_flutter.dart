@@ -5,4 +5,5 @@
 library;
 
 export 'src/libtorrent_flutter_base.dart';
+export 'src/memory_budget_controller.dart';
 export 'src/models.dart';

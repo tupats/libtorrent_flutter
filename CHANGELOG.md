@@ -1,5 +1,40 @@
 # Changelog
 
+## 1.9.0
+
+- **Memory-backed piece storage.** Replaces libtorrent's default `mmap_disk_io`
+  with a custom `disk_interface` that holds piece data in process memory only.
+  Eliminates eMMC iowait that pinned the system during streaming on
+  memory-pressured Android devices. New files: `src/memory_disk_io.{hpp,cpp}`.
+  Wired into every session via `session_params::disk_io_constructor`.
+- **Head-aware LRU eviction.** Each torrent tracks a playback head (byte
+  offset). Pieces inside `[head - rewind, head + prefetch]` (defaults: 16 MB
+  rewind, 160 MB prefetch) are pinned. Pieces outside are evicted LRU when
+  the global cap is exceeded. Two-pass: window-protected first, fallback to
+  pure LRU if the working set alone exceeds the cap.
+- **Adaptive cap from system RAM.** `MemoryBudgetController` (new) polls
+  `lt_get_system_memory` every 5 s and sets `cap = avail × 0.60`, floored at
+  128 MB, ceiling configurable (default uncapped). Hysteresis 32 MB avoids
+  thrash. Auto-started by `LibtorrentFlutter.init()`; disable with
+  `autoTuneMemory: false`. Cross-platform RAM probe: `sysinfo` on
+  Linux/Android, `host_statistics64` on Darwin, `GlobalMemoryStatusEx` on
+  Windows.
+- **Seek-back recovery via `force_recheck`.** libtorrent 2.0.x does not
+  expose `torrent_handle::clear_piece`, so an evicted piece still appears
+  complete in the bitfield. When the HTTP server reads an evicted piece, the
+  read fails; the alert thread detects the inconsistency and calls
+  `force_recheck` (debounced 30 s per torrent) — passing pieces stay,
+  evicted pieces become not-have and re-download from peers. Brief stall on
+  seek-back past the rewind window; then resume.
+- **New FFI surface.** `lt_set_memory_cap(bytes)`,
+  `lt_get_memory_stats(out)`, `lt_set_playback_head(session, stream_id,
+  byte_in_file)`, `lt_set_memory_window(session, stream_id, rewind,
+  prefetch)`, `lt_get_system_memory(total, avail)`.
+- **New Dart API.** `LibtorrentFlutter.setMemoryCap`, `.getMemoryStats`,
+  `.updatePlaybackHead`, `.setMemoryWindow`, `.memoryBudget` getter.
+  `MemoryStats` model. App must call `updatePlaybackHead` from the player
+  position stream (~250–500 ms cadence) to make head-aware eviction work.
+
 ## 1.8.6-tvapp.1
 
 - **Continuous background download for streamed file.** Previously, pieces
